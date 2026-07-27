@@ -1,0 +1,6 @@
+.env
+App/.env
+__pycache__/
+*.db
+App/Uploaded_Resumes/
+*.pyc

@@ -6,11 +6,11 @@ import streamlit as st # core package used in this project
 import pandas as pd
 import base64, random
 import time,datetime
-import pymysql
 import os
 import socket
 import platform
 import geocoder
+import sqlite3
 import secrets
 import io,random
 import plotly.express as px # to create visualisations at the admin session
@@ -18,17 +18,32 @@ import plotly.graph_objects as go
 from geopy.geocoders import Nominatim
 # libraries used to parse the pdf files
 from pyresparser import ResumeParser
-from pdfminer3.layout import LAParams, LTTextBox
-from pdfminer3.pdfpage import PDFPage
-from pdfminer3.pdfinterp import PDFResourceManager
-from pdfminer3.pdfinterp import PDFPageInterpreter
-from pdfminer3.converter import TextConverter
+try:
+    from pdfminer.layout import LAParams, LTTextBox
+    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
+    from pdfminer.converter import TextConverter
+except ImportError:
+    from pdfminer3.layout import LAParams, LTTextBox
+    from pdfminer3.pdfpage import PDFPage
+    from pdfminer3.pdfinterp import PDFResourceManager
+    from pdfminer3.pdfinterp import PDFPageInterpreter
+    from pdfminer3.converter import TextConverter
 from streamlit_tags import st_tags
 from PIL import Image
 # pre stored data for prediction purposes
 from Courses import ds_course,web_course,android_course,ios_course,uiux_course,resume_videos,interview_videos
 import nltk
 nltk.download('stopwords')
+from dotenv import load_dotenv
+load_dotenv()
+import google.generativeai as genai
+import json
+import os
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 ###### Preprocessing functions ######
@@ -88,19 +103,196 @@ def course_recommender(course_list):
     return rec_course
 
 
+def get_gemini_analysis(name, email, reco_field, cand_level, skills, degree, no_of_pages, resume_text):
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
+    prompt = f"""
+You are an expert resume reviewer and senior technical career coach with 15+ years 
+of experience in recruiting across Data Science, Web Development, Android, iOS, 
+and UI/UX roles. You give honest, specific, actionable feedback — never generic 
+praise or filler compliments.
+
+Analyze the resume data below and produce one complete, structured analysis.
+
+CANDIDATE DATA (already extracted by the system):
+- Name: {name}
+- Email: {email}
+- Predicted field: {reco_field}
+- Experience level: {cand_level}
+- Skills detected: {skills}
+- Degree: {degree}
+- Number of resume pages: {no_of_pages}
+
+FULL RAW RESUME TEXT:
+'''
+{resume_text}
+'''
+
+Using ONLY the information above — do not invent companies, dates, job titles, 
+metrics, or achievements that are not present in the text — return a single 
+JSON object with exactly this structure and nothing else (no markdown fences, 
+no preamble, no explanation before or after the JSON):
+
+{{
+  "professional_summary": "A 2-3 sentence third-person summary of who this candidate is professionally, written as if it would appear at the top of their resume. Under 60 words.",
+  "candidate_level_assessment": "1-2 sentences confirming or refining the experience level (Fresher/Intermediate/Experienced) based on actual evidence in the text, not just keyword presence.",
+  "key_strengths": ["3-5 short, specific bullet points on what stands out in this resume"],
+  "gaps_or_weaknesses": ["2-4 honest, specific gaps: vague sections, missing quantification, unclear career narrative, formatting issues, thin project descriptions, etc."],
+  "skills_to_add": ["5-8 skills relevant to the predicted field that are commonly expected but missing from this resume"],
+  "ats_keywords_missing": ["5-8 exact keywords/phrases recruiters or ATS systems would search for in this field that do not appear in the resume text"],
+  "resume_score_breakdown": {{
+    "estimated_score_out_of_100": 0,
+    "reasoning": "1-2 sentences on what pulled the score up or down"
+  }},
+  "one_line_pitch": "A single elevator-pitch sentence a recruiter could use to describe this candidate to a hiring manager",
+  "suggested_next_role": "One specific, realistic job title this resume is best positioned for right now",
+  "top_3_action_items": ["The 3 highest-impact edits this candidate should make to their resume, ordered by priority"]
+}}
+
+Rules:
+- Every claim must be traceable to something actually present in the resume text.
+- If the resume text is too short, garbled, or clearly incomplete (e.g. parsing failure) to analyze confidently, state this explicitly inside "gaps_or_weaknesses" and lower the estimated_score_out_of_100 accordingly rather than guessing.
+- Keep all list items concise — one line each, no sub-bullets.
+- Return valid, parseable JSON only.
+"""
+    try:
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_gemini_field_recommendation(skills, cand_level, degree, resume_text):
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
+    prompt = f"""
+You are an expert technical recruiter who specializes in matching candidates 
+to the right career track based on their actual skills and experience — not 
+just keyword presence.
+
+CANDIDATE DATA:
+- Skills detected: {skills}
+- Experience level: {cand_level}
+- Degree: {degree}
+
+FULL RESUME TEXT:
+'''
+{resume_text}
+'''
+
+Evaluate this candidate against these five career tracks: Data Science, 
+Web Development, Android Development, iOS Development, UI/UX Design.
+
+Return ONLY valid JSON in this exact structure (no markdown fences, no text 
+outside the JSON):
+
+{{
+  "rankings": [
+    {{
+      "field": "Field name",
+      "confidence_percent": 0,
+      "reasoning": "1-2 sentences on why this field fits, citing specific skills/experience from the resume",
+      "matching_skills": ["skills from the resume that support this field"]
+    }}
+  ],
+  "primary_recommendation": "The single best-fit field",
+  "note": "1 sentence on whether this candidate looks like a strong single-track specialist or a multi-track generalist"
+}}
+
+Rules:
+- Return exactly the top 3 fields, ordered by confidence_percent descending.
+- confidence_percent values across all 3 fields do not need to sum to 100 — 
+  they're independent fit scores, not a probability distribution.
+- Base every score strictly on evidence in the resume text and skill list — 
+  do not guess based on degree alone.
+- If the resume shows almost no relevant skills for any of the 5 fields, say 
+  so honestly in "note" and give low confidence scores across the board rather 
+  than forcing a match.
+"""
+    try:
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_gemini_cover_letter(name, reco_field, cand_level, skills, degree, resume_text, job_title, job_description):
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
+    prompt = f"""
+You are an expert career coach and professional cover letter writer. You write 
+tailored, specific, natural-sounding cover letters — never generic templates, 
+never robotic phrasing, no clichés like "I am writing to express my interest."
+
+CANDIDATE DATA:
+- Name: {name}
+- Predicted field: {reco_field}
+- Experience level: {cand_level}
+- Skills: {skills}
+- Degree: {degree}
+
+FULL RESUME TEXT:
+'''
+{resume_text}
+'''
+
+TARGET JOB:
+- Job Title: {job_title}
+- Job Description: 
+'''
+{job_description}
+'''
+
+Write a personalized cover letter for this candidate applying to this specific 
+role. Return ONLY valid JSON in this exact structure (no markdown fences, no 
+text outside the JSON):
+
+{{
+  "cover_letter": "The full cover letter text, 3-4 paragraphs, ready to send. Use \\n\\n between paragraphs.",
+  "tone": "One word describing the tone used (e.g. Professional, Enthusiastic, Confident)",
+  "key_points_highlighted": ["2-4 specific things from the resume this letter emphasizes and why they match the JD"],
+  "customization_note": "1 sentence flagging anything the candidate should manually verify or add (e.g. a specific company detail not in the resume)"
+}}
+
+Rules:
+- Only reference skills, experience, and achievements that actually appear in 
+  the resume text — never invent anything.
+- Directly connect at least 2 requirements from the job description to specific 
+  evidence in the resume.
+- Keep the letter under 350 words.
+- Do not include a greeting/salutation placeholder like "[Hiring Manager Name]" 
+  — just write "Dear Hiring Team," instead.
+- If the job description is missing or too short to tailor to, say so in 
+  "customization_note" and write a strong general cover letter for the 
+  predicted field instead.
+"""
+    try:
+        response = model.generate_content(prompt)
+        return json.loads(response.text)
+    except Exception as e:
+        return {"error": str(e)}
+
+
 ###### Database Stuffs ######
 
 
 # sql connector
-connection = pymysql.connect(host='localhost',user='root',password='root@MySQL4admin',db='cv')
-cursor = connection.cursor()
+try:
+    import pymysql
+    connection = pymysql.connect(host='localhost',user='root',password='root@MySQL4admin',db='cv')
+    cursor = connection.cursor()
+    db_backend = 'mysql'
+except Exception:
+    db_path = os.path.join(os.path.dirname(__file__), 'cv.db')
+    connection = sqlite3.connect(db_path)
+    cursor = connection.cursor()
+    db_backend = 'sqlite'
 
 
 # inserting miscellaneous data, fetched results, prediction and recommendation into user_data table
 def insert_data(sec_token,ip_add,host_name,dev_user,os_name_ver,latlong,city,state,country,act_name,act_mail,act_mob,name,email,res_score,timestamp,no_of_pages,reco_field,cand_level,skills,recommended_skills,courses,pdf_name):
     DB_table_name = 'user_data'
-    insert_sql = "insert into " + DB_table_name + """
-    values (0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+    if db_backend == 'sqlite':
+        insert_sql = "insert into " + DB_table_name + """
+        values (NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+    else:
+        insert_sql = "insert into " + DB_table_name + """
+        values (0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
     rec_values = (str(sec_token),str(ip_add),host_name,dev_user,os_name_ver,str(latlong),city,state,country,act_name,act_mail,act_mob,name,email,str(res_score),timestamp,str(no_of_pages),reco_field,cand_level,skills,recommended_skills,courses,pdf_name)
     cursor.execute(insert_sql, rec_values)
     connection.commit()
@@ -109,8 +301,12 @@ def insert_data(sec_token,ip_add,host_name,dev_user,os_name_ver,latlong,city,sta
 # inserting feedback data into user_feedback table
 def insertf_data(feed_name,feed_email,feed_score,comments,Timestamp):
     DBf_table_name = 'user_feedback'
-    insertfeed_sql = "insert into " + DBf_table_name + """
-    values (0,%s,%s,%s,%s,%s)"""
+    if db_backend == 'sqlite':
+        insertfeed_sql = "insert into " + DBf_table_name + """
+        values (NULL,?,?,?,?,?)"""
+    else:
+        insertfeed_sql = "insert into " + DBf_table_name + """
+        values (0,%s,%s,%s,%s,%s)"""
     rec_values = (feed_name, feed_email, feed_score, comments, Timestamp)
     cursor.execute(insertfeed_sql, rec_values)
     connection.commit()
@@ -119,9 +315,12 @@ def insertf_data(feed_name,feed_email,feed_score,comments,Timestamp):
 ###### Setting Page Configuration (favicon, Logo, Title) ######
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_DIR = os.path.join(BASE_DIR, 'Logo')
+
 st.set_page_config(
    page_title="AI Resume Analyzer",
-   page_icon='./Logo/recommend.png',
+   page_icon=os.path.join(LOGO_DIR, 'recommend.png'),
 )
 
 
@@ -131,12 +330,14 @@ st.set_page_config(
 def run():
     
     # (Logo, Heading, Sidebar etc)
-    img = Image.open('./Logo/RESUM.png')
+    img_path = os.path.join(LOGO_DIR, 'RESUM.png')
+    img = Image.open(img_path)
     st.image(img)
     st.sidebar.markdown("# Choose Something...")
     activities = ["User", "Feedback", "About", "Admin"]
     choice = st.sidebar.selectbox("Choose among the given options:", activities)
-    link = '<b>Built with 🤍 by <a href="https://dnoobnerd.netlify.app/" style="text-decoration: none; color: #021659;">Deepak Padhi</a></b>' 
+    
+    link = '<b>Built with 🤍 by <a href="#" style="text-decoration: none; color: #021659;">Nithish</a></b>' 
     st.sidebar.markdown(link, unsafe_allow_html=True)
     st.sidebar.markdown('''
         <!-- site visitors -->
@@ -156,56 +357,94 @@ def run():
     ###### Creating Database and Table ######
 
 
-    # Create the DB
-    db_sql = """CREATE DATABASE IF NOT EXISTS CV;"""
-    cursor.execute(db_sql)
+    # Create the DB / tables
+    if db_backend == 'mysql':
+        db_sql = """CREATE DATABASE IF NOT EXISTS CV;"""
+        cursor.execute(db_sql)
 
-
-    # Create table user_data and user_feedback
-    DB_table_name = 'user_data'
-    table_sql = "CREATE TABLE IF NOT EXISTS " + DB_table_name + """
-                    (ID INT NOT NULL AUTO_INCREMENT,
-                    sec_token varchar(20) NOT NULL,
-                    ip_add varchar(50) NULL,
-                    host_name varchar(50) NULL,
-                    dev_user varchar(50) NULL,
-                    os_name_ver varchar(50) NULL,
-                    latlong varchar(50) NULL,
-                    city varchar(50) NULL,
-                    state varchar(50) NULL,
-                    country varchar(50) NULL,
-                    act_name varchar(50) NOT NULL,
-                    act_mail varchar(50) NOT NULL,
-                    act_mob varchar(20) NOT NULL,
-                    Name varchar(500) NOT NULL,
-                    Email_ID VARCHAR(500) NOT NULL,
-                    resume_score VARCHAR(8) NOT NULL,
-                    Timestamp VARCHAR(50) NOT NULL,
-                    Page_no VARCHAR(5) NOT NULL,
-                    Predicted_Field BLOB NOT NULL,
-                    User_level BLOB NOT NULL,
-                    Actual_skills BLOB NOT NULL,
-                    Recommended_skills BLOB NOT NULL,
-                    Recommended_courses BLOB NOT NULL,
-                    pdf_name varchar(50) NOT NULL,
-                    PRIMARY KEY (ID)
-                    );
-                """
-    cursor.execute(table_sql)
-
-
-    DBf_table_name = 'user_feedback'
-    tablef_sql = "CREATE TABLE IF NOT EXISTS " + DBf_table_name + """
-                    (ID INT NOT NULL AUTO_INCREMENT,
-                        feed_name varchar(50) NOT NULL,
-                        feed_email VARCHAR(50) NOT NULL,
-                        feed_score VARCHAR(5) NOT NULL,
-                        comments VARCHAR(100) NULL,
+        DB_table_name = 'user_data'
+        table_sql = "CREATE TABLE IF NOT EXISTS " + DB_table_name + """
+                        (ID INT NOT NULL AUTO_INCREMENT,
+                        sec_token varchar(20) NOT NULL,
+                        ip_add varchar(50) NULL,
+                        host_name varchar(50) NULL,
+                        dev_user varchar(50) NULL,
+                        os_name_ver varchar(50) NULL,
+                        latlong varchar(50) NULL,
+                        city varchar(50) NULL,
+                        state varchar(50) NULL,
+                        country varchar(50) NULL,
+                        act_name varchar(50) NOT NULL,
+                        act_mail varchar(50) NOT NULL,
+                        act_mob varchar(20) NOT NULL,
+                        Name varchar(500) NOT NULL,
+                        Email_ID VARCHAR(500) NOT NULL,
+                        resume_score VARCHAR(8) NOT NULL,
                         Timestamp VARCHAR(50) NOT NULL,
+                        Page_no VARCHAR(5) NOT NULL,
+                        Predicted_Field BLOB NOT NULL,
+                        User_level BLOB NOT NULL,
+                        Actual_skills BLOB NOT NULL,
+                        Recommended_skills BLOB NOT NULL,
+                        Recommended_courses BLOB NOT NULL,
+                        pdf_name varchar(50) NOT NULL,
                         PRIMARY KEY (ID)
-                    );
-                """
-    cursor.execute(tablef_sql)
+                        );
+                    """
+        cursor.execute(table_sql)
+
+        DBf_table_name = 'user_feedback'
+        tablef_sql = "CREATE TABLE IF NOT EXISTS " + DBf_table_name + """
+                        (ID INT NOT NULL AUTO_INCREMENT,
+                            feed_name varchar(50) NOT NULL,
+                            feed_email VARCHAR(50) NOT NULL,
+                            feed_score VARCHAR(5) NOT NULL,
+                            comments VARCHAR(100) NULL,
+                            Timestamp VARCHAR(50) NOT NULL,
+                            PRIMARY KEY (ID)
+                        );
+                    """
+        cursor.execute(tablef_sql)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_data (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                sec_token TEXT NOT NULL,
+                ip_add TEXT,
+                host_name TEXT,
+                dev_user TEXT,
+                os_name_ver TEXT,
+                latlong TEXT,
+                city TEXT,
+                state TEXT,
+                country TEXT,
+                act_name TEXT NOT NULL,
+                act_mail TEXT NOT NULL,
+                act_mob TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                Email_ID TEXT NOT NULL,
+                resume_score TEXT NOT NULL,
+                Timestamp TEXT NOT NULL,
+                Page_no TEXT NOT NULL,
+                Predicted_Field TEXT NOT NULL,
+                User_level TEXT NOT NULL,
+                Actual_skills TEXT NOT NULL,
+                Recommended_skills TEXT NOT NULL,
+                Recommended_courses TEXT NOT NULL,
+                pdf_name TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                ID INTEGER PRIMARY KEY AUTOINCREMENT,
+                feed_name TEXT NOT NULL,
+                feed_email TEXT NOT NULL,
+                feed_score TEXT NOT NULL,
+                comments TEXT,
+                Timestamp TEXT NOT NULL
+            )
+        """)
+        connection.commit()
 
 
     ###### CODE FOR CLIENT SIDE (USER) ######
@@ -244,8 +483,11 @@ def run():
                 time.sleep(4)
         
             ### saving the uploaded resume to folder
-            save_image_path = './Uploaded_Resumes/'+pdf_file.name
-            pdf_name = pdf_file.name
+            uploads_dir = os.path.join(BASE_DIR, 'Uploaded_Resumes')
+            os.makedirs(uploads_dir, exist_ok=True)
+            safe_name = os.path.basename(pdf_file.name)
+            save_image_path = os.path.join(uploads_dir, safe_name)
+            pdf_name = safe_name
             with open(save_image_path, "wb") as f:
                 f.write(pdf_file.getbuffer())
             show_pdf(save_image_path)
@@ -330,223 +572,168 @@ def run():
                 rec_course = ''
 
                 ### condition starts to check skills from keywords and predict field
-                for i in resume_data['skills']:
-                
-                    #### Data science recommendation
-                    if i.lower() in ds_keyword:
-                        print(i.lower())
-                        reco_field = 'Data Science'
-                        st.success("** Our analysis says you are looking for Data Science Jobs.**")
-                        recommended_skills = ['Data Visualization','Predictive Analysis','Statistical Modeling','Data Mining','Clustering & Classification','Data Analytics','Quantitative Analysis','Web Scraping','ML Algorithms','Keras','Pytorch','Probability','Scikit-learn','Tensorflow',"Flask",'Streamlit']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Recommended skills generated from System',value=recommended_skills,key = '2')
-                        st.markdown('''<h5 style='text-align: left; color: #1ed760;'>Adding this skills to resume will boost🚀 the chances of getting a Job</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = course_recommender(ds_course)
-                        break
-
-                    #### Web development recommendation
-                    elif i.lower() in web_keyword:
-                        print(i.lower())
-                        reco_field = 'Web Development'
-                        st.success("** Our analysis says you are looking for Web Development Jobs **")
-                        recommended_skills = ['React','Django','Node JS','React JS','php','laravel','Magento','wordpress','Javascript','Angular JS','c#','Flask','SDK']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Recommended skills generated from System',value=recommended_skills,key = '3')
-                        st.markdown('''<h5 style='text-align: left; color: #1ed760;'>Adding this skills to resume will boost🚀 the chances of getting a Job💼</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = course_recommender(web_course)
-                        break
-
-                    #### Android App Development
-                    elif i.lower() in android_keyword:
-                        print(i.lower())
-                        reco_field = 'Android Development'
-                        st.success("** Our analysis says you are looking for Android App Development Jobs **")
-                        recommended_skills = ['Android','Android development','Flutter','Kotlin','XML','Java','Kivy','GIT','SDK','SQLite']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Recommended skills generated from System',value=recommended_skills,key = '4')
-                        st.markdown('''<h5 style='text-align: left; color: #1ed760;'>Adding this skills to resume will boost🚀 the chances of getting a Job💼</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = course_recommender(android_course)
-                        break
-
-                    #### IOS App Development
-                    elif i.lower() in ios_keyword:
-                        print(i.lower())
-                        reco_field = 'IOS Development'
-                        st.success("** Our analysis says you are looking for IOS App Development Jobs **")
-                        recommended_skills = ['IOS','IOS Development','Swift','Cocoa','Cocoa Touch','Xcode','Objective-C','SQLite','Plist','StoreKit',"UI-Kit",'AV Foundation','Auto-Layout']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Recommended skills generated from System',value=recommended_skills,key = '5')
-                        st.markdown('''<h5 style='text-align: left; color: #1ed760;'>Adding this skills to resume will boost🚀 the chances of getting a Job💼</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = course_recommender(ios_course)
-                        break
-
-                    #### Ui-UX Recommendation
-                    elif i.lower() in uiux_keyword:
-                        print(i.lower())
-                        reco_field = 'UI-UX Development'
-                        st.success("** Our analysis says you are looking for UI-UX Development Jobs **")
-                        recommended_skills = ['UI','User Experience','Adobe XD','Figma','Zeplin','Balsamiq','Prototyping','Wireframes','Storyframes','Adobe Photoshop','Editing','Illustrator','After Effects','Premier Pro','Indesign','Wireframe','Solid','Grasp','User Research']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Recommended skills generated from System',value=recommended_skills,key = '6')
-                        st.markdown('''<h5 style='text-align: left; color: #1ed760;'>Adding this skills to resume will boost🚀 the chances of getting a Job💼</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = course_recommender(uiux_course)
-                        break
-
-                    #### For Not Any Recommendations
-                    elif i.lower() in n_any:
-                        print(i.lower())
+                if GEMINI_API_KEY:
+                    with st.spinner("Analyzing career tracks with Gemini AI..."):
+                        field_ai = get_gemini_field_recommendation(
+                            skills=str(resume_data.get('skills', [])),
+                            cand_level=cand_level,
+                            degree=str(resume_data.get('degree', 'NA')),
+                            resume_text=resume_text
+                        )
+                    if "error" not in field_ai:
+                        reco_field = field_ai.get('primary_recommendation', 'NA')
+                        st.success(f"** Our AI analysis says your profile best fits: {reco_field} **")
+                        st.info(f"**Note:** {field_ai.get('note', '')}")
+                        
+                        st.subheader("**Career Track Rankings 🏆**")
+                        for rank in field_ai.get('rankings', []):
+                            with st.expander(f"{rank.get('field', 'Unknown')} - {rank.get('confidence_percent', 0)}% Match"):
+                                st.write(f"**Reasoning:** {rank.get('reasoning', '')}")
+                                st.write(f"**Matching Skills:** {', '.join(rank.get('matching_skills', []))}")
+                    else:
+                        st.error("Error communicating with Gemini AI for field recommendation.")
                         reco_field = 'NA'
-                        st.warning("** Currently our tool only predicts and recommends for Data Science, Web, Android, IOS and UI/UX Development**")
-                        recommended_skills = ['No Recommendations']
-                        recommended_keywords = st_tags(label='### Recommended skills for you.',
-                        text='Currently No Recommendations',value=recommended_skills,key = '6')
-                        st.markdown('''<h5 style='text-align: left; color: #092851;'>Maybe Available in Future Updates</h5>''',unsafe_allow_html=True)
-                        # course recommendation
-                        rec_course = "Sorry! Not Available for this Field"
-                        break
+                else:
+                    st.warning("AI field recommendation is unavailable without an API Key.")
+                    reco_field = 'NA'
+
+                # Map to legacy database fields
+                if reco_field == 'Data Science':
+                    recommended_skills = ['Data Visualization','Predictive Analysis','Statistical Modeling','Data Mining','Clustering & Classification','Data Analytics','Quantitative Analysis','Web Scraping','ML Algorithms','Keras','Pytorch','Probability','Scikit-learn','Tensorflow',"Flask",'Streamlit']
+                    rec_course = course_recommender(ds_course)
+                elif reco_field == 'Web Development':
+                    recommended_skills = ['React','Django','Node JS','React JS','php','laravel','Magento','wordpress','Javascript','Angular JS','c#','Flask','SDK']
+                    rec_course = course_recommender(web_course)
+                elif reco_field == 'Android Development':
+                    recommended_skills = ['Android','Android development','Flutter','Kotlin','XML','Java','Kivy','GIT','SDK','SQLite']
+                    rec_course = course_recommender(android_course)
+                elif reco_field == 'IOS Development':
+                    recommended_skills = ['IOS','IOS Development','Swift','Cocoa','Cocoa Touch','Xcode','Objective-C','SQLite','Plist','StoreKit',"UI-Kit",'AV Foundation','Auto-Layout']
+                    rec_course = course_recommender(ios_course)
+                elif reco_field == 'UI-UX Development' or reco_field == 'UI/UX Design':
+                    recommended_skills = ['UI','User Experience','Adobe XD','Figma','Zeplin','Balsamiq','Prototyping','Wireframes','Storyframes','Adobe Photoshop','Editing','Illustrator','After Effects','Premier Pro','Indesign','Wireframe','Solid','Grasp','User Research']
+                    rec_course = course_recommender(uiux_course)
+                else:
+                    recommended_skills = ['No Recommendations']
+                    rec_course = "Sorry! Not Available for this Field"
+                
+                recommended_keywords = st_tags(label='### Recommended skills for you.',
+                text='Recommended skills generated from System',value=recommended_skills,key = 'legacy_skills')
 
 
-                ## Resume Scorer & Resume Writing Tips
-                st.subheader("**Resume Tips & Ideas 🥂**")
+
+                ## Resume Scorer & Resume Writing Tips using Gemini API
+                st.subheader("**AI Resume Analysis & Tips 🤖**")
+                
                 resume_score = 0
-                
-                ### Predicting Whether these key points are added to the resume
-                if 'Objective' or 'Summary' in resume_text:
-                    resume_score = resume_score+6
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Objective/Summary</h4>''',unsafe_allow_html=True)                
+                if not GEMINI_API_KEY:
+                    st.warning("AI summary is temporarily unavailable.")
                 else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add your career objective, it will give your career intension to the Recruiters.</h4>''',unsafe_allow_html=True)
+                    with st.spinner("Analyzing your resume with Gemini AI..."):
+                        degree = str(resume_data.get('degree', 'NA'))
+                        pages = str(resume_data.get('no_of_pages', 'NA'))
+                        ai_result = get_gemini_analysis(
+                            name=resume_data.get('name', 'NA'),
+                            email=resume_data.get('email', 'NA'),
+                            reco_field=reco_field,
+                            cand_level=cand_level,
+                            skills=str(resume_data.get('skills', 'NA')),
+                            degree=degree,
+                            no_of_pages=pages,
+                            resume_text=resume_text
+                        )
+                    
+                    if "error" in ai_result:
+                        st.error(f"Error communicating with Gemini AI: {ai_result['error']}")
+                    else:
+                        st.markdown(f"**Professional Summary:** {ai_result.get('professional_summary', 'N/A')}")
+                        st.markdown(f"**Candidate Level Assessment:** {ai_result.get('candidate_level_assessment', 'N/A')}")
+                        st.markdown(f"**Elevator Pitch:** {ai_result.get('one_line_pitch', 'N/A')}")
+                        st.markdown(f"**Suggested Next Role:** {ai_result.get('suggested_next_role', 'N/A')}")
+                        
+                        st.subheader("**Key Strengths 💪**")
+                        for strength in ai_result.get('key_strengths', []):
+                            st.markdown(f"- {strength}")
+                            
+                        st.subheader("**Gaps or Weaknesses ⚠️**")
+                        for gap in ai_result.get('gaps_or_weaknesses', []):
+                            st.markdown(f"- {gap}")
+                            
+                        st.subheader("**Skills to Add 📈**")
+                        if ai_result.get('skills_to_add'):
+                            st_tags(label='Missing Required Skills', text='', value=ai_result.get('skills_to_add', []), key='skills_to_add_tags')
+                            
+                        st.subheader("**Missing ATS Keywords 🔍**")
+                        if ai_result.get('ats_keywords_missing'):
+                            st_tags(label='ATS Keywords to Add', text='', value=ai_result.get('ats_keywords_missing', []), key='ats_keywords_missing_tags')
+                            
+                        st.subheader("**Top 3 Action Items 🎯**")
+                        for item in ai_result.get('top_3_action_items', []):
+                            st.markdown(f"✅ {item}")
+                            
+                        resume_score = ai_result.get('resume_score_breakdown', {}).get('estimated_score_out_of_100', 0)
+                        reasoning = ai_result.get('resume_score_breakdown', {}).get('reasoning', '')
+                        
+                        st.subheader("**AI Resume Score 📝**")
+                        st.markdown(
+                            """
+                            <style>
+                                .stProgress > div > div > div > div {
+                                    background-color: #d73b5c;
+                                }
+                            </style>""",
+                            unsafe_allow_html=True,
+                        )
+                        my_bar = st.progress(0)
+                        score = 0
+                        for percent_complete in range(resume_score):
+                            score += 1
+                            time.sleep(0.02)
+                            my_bar.progress(percent_complete + 1)
+                            
+                        st.success(f"** Your AI Resume Score: {score} / 100 **")
+                        st.info(f"**Reasoning:** {reasoning}")
 
-                if 'Education' or 'School' or 'College'  in resume_text:
-                    resume_score = resume_score + 12
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Education Details</h4>''',unsafe_allow_html=True)
+                ## AI Cover Letter Generator
+                st.subheader("**AI Cover Letter Generator ✉️**")
+                if not GEMINI_API_KEY:
+                    st.warning("AI Cover Letter Generator is temporarily unavailable without an API Key.")
                 else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Education. It will give Your Qualification level to the recruiter</h4>''',unsafe_allow_html=True)
-
-                if 'EXPERIENCE' in resume_text:
-                    resume_score = resume_score + 16
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Experience</h4>''',unsafe_allow_html=True)
-                elif 'Experience' in resume_text:
-                    resume_score = resume_score + 16
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Experience</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Experience. It will help you to stand out from crowd</h4>''',unsafe_allow_html=True)
-
-                if 'INTERNSHIPS'  in resume_text:
-                    resume_score = resume_score + 6
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Internships</h4>''',unsafe_allow_html=True)
-                elif 'INTERNSHIP'  in resume_text:
-                    resume_score = resume_score + 6
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Internships</h4>''',unsafe_allow_html=True)
-                elif 'Internships'  in resume_text:
-                    resume_score = resume_score + 6
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Internships</h4>''',unsafe_allow_html=True)
-                elif 'Internship'  in resume_text:
-                    resume_score = resume_score + 6
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Internships</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Internships. It will help you to stand out from crowd</h4>''',unsafe_allow_html=True)
-
-                if 'SKILLS'  in resume_text:
-                    resume_score = resume_score + 7
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Skills</h4>''',unsafe_allow_html=True)
-                elif 'SKILL'  in resume_text:
-                    resume_score = resume_score + 7
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Skills</h4>''',unsafe_allow_html=True)
-                elif 'Skills'  in resume_text:
-                    resume_score = resume_score + 7
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Skills</h4>''',unsafe_allow_html=True)
-                elif 'Skill'  in resume_text:
-                    resume_score = resume_score + 7
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added Skills</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Skills. It will help you a lot</h4>''',unsafe_allow_html=True)
-
-                if 'HOBBIES' in resume_text:
-                    resume_score = resume_score + 4
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Hobbies</h4>''',unsafe_allow_html=True)
-                elif 'Hobbies' in resume_text:
-                    resume_score = resume_score + 4
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Hobbies</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Hobbies. It will show your personality to the Recruiters and give the assurance that you are fit for this role or not.</h4>''',unsafe_allow_html=True)
-
-                if 'INTERESTS'in resume_text:
-                    resume_score = resume_score + 5
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Interest</h4>''',unsafe_allow_html=True)
-                elif 'Interests'in resume_text:
-                    resume_score = resume_score + 5
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Interest</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Interest. It will show your interest other that job.</h4>''',unsafe_allow_html=True)
-
-                if 'ACHIEVEMENTS' in resume_text:
-                    resume_score = resume_score + 13
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Achievements </h4>''',unsafe_allow_html=True)
-                elif 'Achievements' in resume_text:
-                    resume_score = resume_score + 13
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Achievements </h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Achievements. It will show that you are capable for the required position.</h4>''',unsafe_allow_html=True)
-
-                if 'CERTIFICATIONS' in resume_text:
-                    resume_score = resume_score + 12
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Certifications </h4>''',unsafe_allow_html=True)
-                elif 'Certifications' in resume_text:
-                    resume_score = resume_score + 12
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Certifications </h4>''',unsafe_allow_html=True)
-                elif 'Certification' in resume_text:
-                    resume_score = resume_score + 12
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Certifications </h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Certifications. It will show that you have done some specialization for the required position.</h4>''',unsafe_allow_html=True)
-
-                if 'PROJECTS' in resume_text:
-                    resume_score = resume_score + 19
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Projects</h4>''',unsafe_allow_html=True)
-                elif 'PROJECT' in resume_text:
-                    resume_score = resume_score + 19
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Projects</h4>''',unsafe_allow_html=True)
-                elif 'Projects' in resume_text:
-                    resume_score = resume_score + 19
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Projects</h4>''',unsafe_allow_html=True)
-                elif 'Project' in resume_text:
-                    resume_score = resume_score + 19
-                    st.markdown('''<h5 style='text-align: left; color: #1ed760;'>[+] Awesome! You have added your Projects</h4>''',unsafe_allow_html=True)
-                else:
-                    st.markdown('''<h5 style='text-align: left; color: #000000;'>[-] Please add Projects. It will show that you have done work related the required position or not.</h4>''',unsafe_allow_html=True)
-
-                st.subheader("**Resume Score 📝**")
-                
-                st.markdown(
-                    """
-                    <style>
-                        .stProgress > div > div > div > div {
-                            background-color: #d73b5c;
-                        }
-                    </style>""",
-                    unsafe_allow_html=True,
-                )
-
-                ### Score Bar
-                my_bar = st.progress(0)
-                score = 0
-                for percent_complete in range(resume_score):
-                    score +=1
-                    time.sleep(0.1)
-                    my_bar.progress(percent_complete + 1)
-
-                ### Score
-                st.success('** Your Resume Writing Score: ' + str(score)+'**')
-                st.warning("** Note: This score is calculated based on the content that you have in your Resume. **")
-
-                # print(str(sec_token), str(ip_add), (host_name), (dev_user), (os_name_ver), (latlong), (city), (state), (country), (act_name), (act_mail), (act_mob), resume_data['name'], resume_data['email'], str(resume_score), timestamp, str(resume_data['no_of_pages']), reco_field, cand_level, str(resume_data['skills']), str(recommended_skills), str(rec_course), pdf_name)
-
+                    st.markdown("Enter the details of the job you are applying for to generate a personalized cover letter.")
+                    with st.form("cover_letter_form"):
+                        job_title = st.text_input("Job Title", placeholder="e.g. Senior Frontend Developer")
+                        job_description = st.text_area("Job Description", placeholder="Paste the full job description here...", height=200)
+                        submitted = st.form_submit_button("Generate Cover Letter")
+                        
+                    if submitted:
+                        if not job_title or not job_description:
+                            st.error("Please provide both Job Title and Job Description.")
+                        else:
+                            with st.spinner("Drafting your personalized cover letter..."):
+                                cl_result = get_gemini_cover_letter(
+                                    name=resume_data.get('name', 'Candidate'),
+                                    reco_field=reco_field,
+                                    cand_level=cand_level,
+                                    skills=str(resume_data.get('skills', 'NA')),
+                                    degree=str(resume_data.get('degree', 'NA')),
+                                    resume_text=resume_text,
+                                    job_title=job_title,
+                                    job_description=job_description
+                                )
+                                
+                            if "error" in cl_result:
+                                st.error(f"Error communicating with Gemini AI: {cl_result['error']}")
+                            else:
+                                st.success("Cover Letter Generated!")
+                                st.markdown(f"**Tone:** {cl_result.get('tone', 'N/A')}")
+                                st.info(f"**Note:** {cl_result.get('customization_note', '')}")
+                                
+                                st.markdown("**Key Points Highlighted:**")
+                                for point in cl_result.get('key_points_highlighted', []):
+                                    st.markdown(f"- {point}")
+                                    
+                                st.markdown("**Your Cover Letter:**")
+                                st.text_area("Review and Copy", value=cl_result.get('cover_letter', ''), height=400)
 
                 ### Getting Current Date and Time
                 ts = time.time()
@@ -652,7 +839,7 @@ def run():
 
         <p align="justify">
             Built with 🤍 by 
-            <a href="https://dnoobnerd.netlify.app/" style="text-decoration: none; color: grey;">Deepak Padhi</a> through 
+            <a href="#" style="text-decoration: none; color: grey;">Nithish</a> through 
             <a href="https://www.linkedin.com/in/mrbriit/" style="text-decoration: none; color: grey;">Dr Bright --(Data Scientist)</a>
         </p>
 
@@ -673,16 +860,22 @@ def run():
             if ad_user == 'admin' and ad_password == 'admin@resume-analyzer':
                 
                 ### Fetch miscellaneous data from user_data(table) and convert it into dataframe
-                cursor.execute('''SELECT ID, ip_add, resume_score, convert(Predicted_Field using utf8), convert(User_level using utf8), city, state, country from user_data''')
+                if db_backend == 'mysql':
+                    cursor.execute('''SELECT ID, ip_add, resume_score, convert(Predicted_Field using utf8), convert(User_level using utf8), city, state, country from user_data''')
+                else:
+                    cursor.execute('''SELECT ID, ip_add, resume_score, Predicted_Field, User_level, city, state, country from user_data''')
                 datanalys = cursor.fetchall()
                 plot_data = pd.DataFrame(datanalys, columns=['Idt', 'IP_add', 'resume_score', 'Predicted_Field', 'User_Level', 'City', 'State', 'Country'])
                 
                 ### Total Users Count with a Welcome Message
                 values = plot_data.Idt.count()
-                st.success("Welcome Deepak ! Total %d " % values + " User's Have Used Our Tool : )")                
+                st.success("Welcome Nithish ! Total %d " % values + " User's Have Used Our Tool : )")                
                 
                 ### Fetch user data from user_data(table) and convert it into dataframe
-                cursor.execute('''SELECT ID, sec_token, ip_add, act_name, act_mail, act_mob, convert(Predicted_Field using utf8), Timestamp, Name, Email_ID, resume_score, Page_no, pdf_name, convert(User_level using utf8), convert(Actual_skills using utf8), convert(Recommended_skills using utf8), convert(Recommended_courses using utf8), city, state, country, latlong, os_name_ver, host_name, dev_user from user_data''')
+                if db_backend == 'mysql':
+                    cursor.execute('''SELECT ID, sec_token, ip_add, act_name, act_mail, act_mob, convert(Predicted_Field using utf8), Timestamp, Name, Email_ID, resume_score, Page_no, pdf_name, convert(User_level using utf8), convert(Actual_skills using utf8), convert(Recommended_skills using utf8), convert(Recommended_courses using utf8), city, state, country, latlong, os_name_ver, host_name, dev_user from user_data''')
+                else:
+                    cursor.execute('''SELECT ID, sec_token, ip_add, act_name, act_mail, act_mob, Predicted_Field, Timestamp, Name, Email_ID, resume_score, Page_no, pdf_name, User_level, Actual_skills, Recommended_skills, Recommended_courses, city, state, country, latlong, os_name_ver, host_name, dev_user from user_data''')
                 data = cursor.fetchall()                
 
                 st.header("**User's Data**")
