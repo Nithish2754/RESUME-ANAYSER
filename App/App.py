@@ -19,13 +19,6 @@ from geopy.geocoders import Nominatim
 # libraries used to parse the pdf files
 import nltk
 nltk.download('stopwords')
-import spacy
-original_load = spacy.load
-def safe_load(name, **kwargs):
-    if "pyresparser" in str(name):
-        return original_load("en_core_web_sm", **kwargs)
-    return original_load(name, **kwargs)
-spacy.load = safe_load
 from pyresparser import ResumeParser
 try:
     from pdfminer.layout import LAParams, LTTextBox
