@@ -87,10 +87,11 @@ def pdf_reader(file):
 
 # show uploaded file path to view pdf_display
 def show_pdf(file_path):
+    import streamlit.components.v1 as components
     with open(file_path, "rb") as f:
         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = f'<object data="data:application/pdf;base64,{base64_pdf}" type="application/pdf" width="700" height="1000"><p>Alternative text - include a link <a href="data:application/pdf;base64,{base64_pdf}">to the PDF!</a></p></object>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
+    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
+    components.html(pdf_display, height=1000)
 
 
 # course recommendations which has data already loaded from Courses.py
