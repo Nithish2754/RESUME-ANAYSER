@@ -1,4 +1,4 @@
-﻿altair
+altair
 attrs
 blinker
 blis
@@ -55,7 +55,6 @@ Pygments
 Pympler
 PyMySQL
 pyparsing
-pyresparser
 pyrsistent
 python-dateutil
 pytz
