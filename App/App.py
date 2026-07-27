@@ -23,7 +23,7 @@ import spacy
 original_load = spacy.load
 def safe_load(name, **kwargs):
     if "pyresparser" in str(name):
-        raise OSError("Skip custom model")
+        return original_load("en_core_web_sm", **kwargs)
     return original_load(name, **kwargs)
 spacy.load = safe_load
 from pyresparser import ResumeParser
