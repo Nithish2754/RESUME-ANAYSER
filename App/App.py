@@ -87,11 +87,11 @@ def pdf_reader(file):
 
 # show uploaded file path to view pdf_display
 def show_pdf(file_path):
-    import streamlit.components.v1 as components
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf">'
-    components.html(pdf_display, height=1000)
+    try:
+        from streamlit_pdf_viewer import pdf_viewer
+        pdf_viewer(file_path, width=700, height=1000)
+    except ImportError:
+        st.warning("PDF viewer module not found. Please install streamlit-pdf-viewer.")
 
 
 # course recommendations which has data already loaded from Courses.py
