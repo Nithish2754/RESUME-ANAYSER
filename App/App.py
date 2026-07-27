@@ -471,12 +471,15 @@ def run():
         os_name_ver = platform.system() + " " + platform.release()
         g = geocoder.ip('me')
         latlong = g.latlng
-        geolocator = Nominatim(user_agent="http")
-        location = geolocator.reverse(latlong, language='en')
-        address = location.raw['address']
-        cityy = address.get('city', '')
-        statee = address.get('state', '')
-        countryy = address.get('country', '')  
+        try:
+            geolocator = Nominatim(user_agent="ai_resume_analyzer_app")
+            location = geolocator.reverse(latlong, language='en', timeout=5)
+            address = location.raw['address']
+            cityy = address.get('city', '')
+            statee = address.get('state', '')
+            countryy = address.get('country', '')  
+        except Exception:
+            cityy, statee, countryy = "Unknown", "Unknown", "Unknown"
         city = cityy
         state = statee
         country = countryy
