@@ -17,6 +17,12 @@ import plotly.express as px # to create visualisations at the admin session
 import plotly.graph_objects as go
 from geopy.geocoders import Nominatim
 # libraries used to parse the pdf files
+import nltk
+nltk.download('stopwords')
+import spacy
+import spacy.cli
+if not spacy.util.is_package("en_core_web_sm"):
+    spacy.cli.download("en_core_web_sm")
 from pyresparser import ResumeParser
 try:
     from pdfminer.layout import LAParams, LTTextBox
