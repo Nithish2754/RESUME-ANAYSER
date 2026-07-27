@@ -89,7 +89,7 @@ def pdf_reader(file):
 def show_pdf(file_path):
     with open(file_path, "rb") as f:
         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = F'<embed src="data:application/pdf;base64,{base64_pdf}" width="700" height="1000" type="application/pdf">'
+    pdf_display = f'<object data="data:application/pdf;base64,{base64_pdf}" type="application/pdf" width="700" height="1000"><p>Alternative text - include a link <a href="data:application/pdf;base64,{base64_pdf}">to the PDF!</a></p></object>'
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 
