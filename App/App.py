@@ -112,7 +112,7 @@ def course_recommender(course_list):
 
 
 def get_gemini_analysis(name, email, reco_field, cand_level, skills, degree, no_of_pages, resume_text):
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-pro')
     prompt = f"""
 You are an expert resume reviewer and senior technical career coach with 15+ years 
 of experience in recruiting across Data Science, Web Development, Android, iOS, 
@@ -164,12 +164,17 @@ Rules:
 """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text)
+        text = response.text.strip()
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+        return json.loads(text)
     except Exception as e:
         return {"error": str(e)}
 
 def get_gemini_field_recommendation(skills, cand_level, degree, resume_text):
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-pro')
     prompt = f"""
 You are an expert technical recruiter who specializes in matching candidates 
 to the right career track based on their actual skills and experience — not 
@@ -216,12 +221,17 @@ Rules:
 """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text)
+        text = response.text.strip()
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+        return json.loads(text)
     except Exception as e:
         return {"error": str(e)}
 
 def get_gemini_cover_letter(name, reco_field, cand_level, skills, degree, resume_text, job_title, job_description):
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-pro')
     prompt = f"""
 You are an expert career coach and professional cover letter writer. You write 
 tailored, specific, natural-sounding cover letters — never generic templates, 
@@ -271,7 +281,12 @@ Rules:
 """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text)
+        text = response.text.strip()
+        if text.startswith("```json"):
+            text = text[7:-3].strip()
+        elif text.startswith("```"):
+            text = text[3:-3].strip()
+        return json.loads(text)
     except Exception as e:
         return {"error": str(e)}
 
