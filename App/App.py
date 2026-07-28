@@ -43,12 +43,12 @@ import google.generativeai as genai
 import json
 import os
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    try:
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    except Exception:
-        pass
+GEMINI_API_KEY = None
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
@@ -128,6 +128,8 @@ def course_recommender(course_list):
 
 
 def get_gemini_analysis(name, email, reco_field, cand_level, skills, degree, no_of_pages, resume_text):
+    if GEMINI_API_KEY:
+        st.caption(f"(Debug) Using Gemini API Key ending in: ...{GEMINI_API_KEY[-4:]}")
     model = genai.GenerativeModel(get_best_gemini_model())
     prompt = f"""
 You are an expert resume reviewer and senior technical career coach with 15+ years 
