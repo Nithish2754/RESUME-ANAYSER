@@ -52,6 +52,22 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+def get_best_gemini_model():
+    # Auto-detect a working model instead of hardcoding, which prevents 404s
+    fallback_model = "gemini-1.5-flash"
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                if 'flash' in m.name:
+                    return m.name.replace('models/', '')
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                if 'pro' in m.name:
+                    return m.name.replace('models/', '')
+    except Exception:
+        pass
+    return fallback_model
+
 
 ###### Preprocessing functions ######
 
@@ -112,7 +128,7 @@ def course_recommender(course_list):
 
 
 def get_gemini_analysis(name, email, reco_field, cand_level, skills, degree, no_of_pages, resume_text):
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel(get_best_gemini_model())
     prompt = f"""
 You are an expert resume reviewer and senior technical career coach with 15+ years 
 of experience in recruiting across Data Science, Web Development, Android, iOS, 
@@ -174,7 +190,7 @@ Rules:
         return {"error": str(e)}
 
 def get_gemini_field_recommendation(skills, cand_level, degree, resume_text):
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel(get_best_gemini_model())
     prompt = f"""
 You are an expert technical recruiter who specializes in matching candidates 
 to the right career track based on their actual skills and experience — not 
@@ -231,7 +247,7 @@ Rules:
         return {"error": str(e)}
 
 def get_gemini_cover_letter(name, reco_field, cand_level, skills, degree, resume_text, job_title, job_description):
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel(get_best_gemini_model())
     prompt = f"""
 You are an expert career coach and professional cover letter writer. You write 
 tailored, specific, natural-sounding cover letters — never generic templates, 
